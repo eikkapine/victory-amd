@@ -657,7 +657,12 @@ impl Player {
         step("pipelines", &mut at);
         player.make_descriptors()?;
         step("descriptors", &mut at);
-        player.load_contents()?;
+        if let Err(e) = player.load_contents() {
+            // The report is not reached: what the debug layer and the
+            // loading said would be lost.
+            player.say_what_was_seen();
+            return Err(e);
+        }
         step("contents", &mut at);
         player.make_masters(options.buffers, options.restore)?;
         step("copies to restore from", &mut at);
@@ -681,6 +686,19 @@ impl Player {
             steps.join(", ")
         ));
         Ok(player)
+    }
+
+    /// Logs the notes so far and the debug layer's errors, for a load that
+    /// fails before any report is made.
+    fn say_what_was_seen(&self) {
+        for n in &self.notes {
+            tracing::warn!("{n}");
+        }
+        if let Some(q) = &self.info {
+            for m in debug_messages(q) {
+                tracing::error!("debug layer: {m}");
+            }
+        }
     }
 
     fn note(&mut self, n: String) {
@@ -767,8 +785,10 @@ impl Player {
                 _ => gpu::to_props(p),
             }
         };
-        // Flags a replay has no use for: sharing, display, not zeroed.
-        const DROP: i32 = 0x1 | 0x8 | 0x20 | 0x1000;
+        // Flags a replay has no use for: sharing, display, not zeroed; and not
+        // resident (0x800): the host makes such memory resident when it is
+        // used, a replay never does, and the card hung at the first copy.
+        const DROP: i32 = 0x1 | 0x8 | 0x20 | 0x800 | 0x1000;
         let used_by_buffers_only: HashSet<u32> = {
             let mut textures = HashSet::new();
             for r in &self.frame.resources {
@@ -1506,7 +1526,10 @@ impl Player {
             }
         })?;
         let file = File::open(self.folder.join("contents.bin"))?;
-        self.upload(&textures, &file, |player, list, parts, staging| {
+        let copy = |player: &Player,
+                    list: &ID3D12GraphicsCommandList,
+                    parts: &[(&Content, u64, u64)],
+                    staging: &ID3D12Resource| {
             for (c, len, at) in parts {
                 let Some(o) = player.objects.get(&c.res) else {
                     continue;
@@ -1538,7 +1561,36 @@ impl Player {
                     }
                 }
             }
-        })?;
+        };
+        // `VICTORY_REPLAY_STEPWISE=<parts>`: that many parts at a time, each
+        // group run to its end, and a group the card fails on named (to find
+        // what a replay's load hangs on).
+        let stepwise = std::env::var("VICTORY_REPLAY_STEPWISE")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|n| *n > 0);
+        match stepwise {
+            None => self.upload(&textures, &file, &copy)?,
+            Some(n) => {
+                for (g, group) in textures.chunks(n).enumerate() {
+                    let done = self
+                        .upload(group, &file, &copy)
+                        .and_then(|()| Ok(self.worker.idle()?));
+                    if let Err(e) = done {
+                        for (c, len, _) in group {
+                            let desc = self
+                                .objects
+                                .get(&c.res)
+                                .map(|o| &self.frame.resources[o.index]);
+                            tracing::error!(
+                                "in the group the card failed on ({g}): {c:?} {len} bytes, {desc:?}"
+                            );
+                        }
+                        return Err(e);
+                    }
+                }
+            }
+        }
         // To the states of the frame's start.
         let mut back = Vec::new();
         for r in &self.frame.resources {

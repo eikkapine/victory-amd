@@ -123,8 +123,11 @@ dispatches, faults and what came.
   commands 84 ms): `CopyForBVHUpdate` 13.3 ms in 63 dispatches (before the
   bound), traces 24 ms (`RaytraceVBuffer` 7.9, screen probes 6.4, irradiance
   cache 3.5, primary probes 2.3, shadows 1.6).
-- Captures made on 2026-11-25 (builder on or off) hang the card in a replay
-  (cause unknown; do not try).
+- Captures made on 2026-11-25 (builder on or off) hung the card in a replay,
+  at the first copy of the capture's contents: resources made not resident
+  (`D3D12_HEAP_FLAG_CREATE_NOT_RESIDENT`) were made so again and never made
+  resident. A replay leaves the flag out now (2026-11-27; a capture with the
+  builder on replays, picture at 41 dB of the presented one).
 - Five shadow-mask trace programs do not translate (a structure's address out
   of a descriptor picked from the heap by a computed index: the host would have
   to give a table of addresses by slot). The title did not create them in any
